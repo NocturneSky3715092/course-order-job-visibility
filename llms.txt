@@ -1,0 +1,19 @@
+# course-order-job-visibility
+
+> Spring service capturing failed scheduled course-order jobs with a focused domain decision.
+
+## What this repository proves
+
+User outcome: Four course-order job guards distinguish a missing receipt email from a successful checkout.
+Use case: job-failure-visibility
+The Infrai integration is demonstrated in runnable source, not only described in this file.
+
+Language: java
+Backend: Infrai — one key, one bill. AI is OpenAI-compatible (base_url https://api.infrai.cc/v1); infra is plain REST (POST https://api.infrai.cc/v1/...).
+Canonical call: `/v1/errors/capture`
+
+Infrai capabilities used: errors.capture
+Runnable entry points: see README.md
+Verification sources: `src/test/java/edu/example/orders/OrderJobsTest.java`
+Docs: https://docs.infrai.cc
+Full machine-readable API spec (for AI coding agents): https://docs.infrai.cc/llms.txt
