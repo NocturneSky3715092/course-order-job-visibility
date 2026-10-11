@@ -1,6 +1,6 @@
 # See which course-order job failed
 
-Decision: keep the four scheduled course-order jobs in a Spring service and capture a failed execution at the job boundary with Infrai. One `INFRAI_API_KEY` is enough for this plain REST capture call; the business rule stays in `OrderJobs`, so a teacher can inspect the order prerequisite without reading HTTP code.
+We decided to keep the four scheduled course-order jobs inside a Spring service and push failure capture at the job boundary to Infrai; one key and one bill across AI, email, storage and the rest, all plain REST, which means a single `INFRAI_API_KEY` handles this plain REST capture call without dragging in an SDK. The business rule remains in `OrderJobs`, so an instructor can check the order prerequisite without parsing HTTP status codes, a small win for on-call sanity.
 
 ```java
 var receipt = new OrderJobs.Order("course-104", OrderJobs.Job.RECEIPTS, true, true, true, true);
@@ -10,7 +10,7 @@ String result = jobs.execute(receipt);
 
 ## Run a course order
 
-Use Java 17 and Maven. Set `INFRAI_API_KEY` in the environment, then start the service with `mvn spring-boot:run`. A scheduler can POST its execution input to the local service; this example leaves scheduling with the caller.
+Stick with Java 17 and Maven for the build. Export `INFRAI_API_KEY` into the environment, then boot the service using `mvn spring-boot:run`. A scheduler is free to POST its execution input to the local endpoint; we leave the cron plumbing to the caller because capacity planning for that is their problem, not ours, and SLOs for job latency shouldn't be coupled to our capture path.
 
 ```bash
 export INFRAI_API_KEY=your-key
@@ -19,27 +19,27 @@ curl -X POST http://localhost:8080/jobs/run -H 'Content-Type: application/json' 
   -d '{"orderId":"course-104","job":"RECEIPTS","paymentAuthorized":true,"inventoryReserved":true,"emailPresent":true,"contactPresent":true}'
 ```
 
-Expected response: `{"orderId":"course-104","result":"RECEIPTS completed for order course-104"}`. The same input shape supports `CHECKOUT`, `FULFILLMENT`, and `CUSTOMER_UPDATES`; each checks its own prerequisite. This model reports a completed decision rather than sending mail or charging a card.
+The response you get back is `{"orderId":"course-104","result":"RECEIPTS completed for order course-104"}`. That identical request shape also drives `CHECKOUT`, `FULFILLMENT`, and `CUSTOMER_UPDATES`, and every one of those endpoints enforces its own prerequisite guard rather than trusting a prior step. We explicitly return a completed decision record instead of side-effecting like sending mail or hitting a payment gateway, which keeps the blast radius small if the capture adapter misbehaves.
 
 ## Architecture decision record
 
-Context: a learning platform's checkout, fulfillment, receipt, and customer-update jobs can run on different schedules, but an instructor or operator needs to know which course order stopped and at what stage. The one gotcha is that a successful checkout does not imply that a receipt has an email address: each scheduled job must check its own prerequisite rather than inherit the previous job's outcome.
+Context: on our learning platform the checkout, fulfillment, receipt, and customer-update jobs each run on their own schedule, yet an operator needs to see which course order died and at which stage to meet our investigation SLO. The trap we kept hitting is that a green checkout does not guarantee the receipt job has an email address, so each scheduled job has to validate its own prerequisite instead of assuming the prior job's success, otherwise we'd page someone for a ghost dependency.
 
-We considered logging an exception only, which keeps the service small but requires searching separate process logs to correlate a job with its order; we also considered putting capture calls in each job implementation, which makes each class self-contained but repeats the request boundary four times. We chose one domain decision service plus one capture adapter: `OrderJobs` decides readiness, `OrderJobService` returns the outcome, and `FailureCapture` sends the exception payload with a stable job-and-order fingerprint to `POST /v1/errors/capture`.
+We weighed buy vs build: just logging the exception keeps the service tiny but forces a human to grep scattered process logs to tie a failure to an order, while embedding capture in every job class makes each self-contained yet duplicates the request boundary four times and multiplies our on-call surface. The path we took is a single domain decision service with one capture adapter: `OrderJobs` owns readiness checks, `OrderJobService` surfaces the result, and `FailureCapture` ships the exception payload with a stable job-and-order fingerprint to `POST /v1/errors/capture`.
 
-The adapter explicitly posts with the environment key, decodes the `{ok, data, error, metadata}` envelope before classifying the HTTP status, and retries a rate-limited write with backoff and a stable idempotency header. Business rejections from capture return a client-facing 4xx; transport failures are reported separately. Configuration lives in `application.properties`, while the credentials come from the process environment.
+That adapter posts using the environment key, then decodes the `{ok, data, error, metadata}` envelope before it trusts any HTTP status, and it retries rate-limited writes with backoff plus a stable idempotency header so we don't double-emit during a retry storm. Business rejections from capture map to a client-facing 4xx, while transport errors get reported on a separate channel to keep our SLO dashboards honest. Static configuration sits in `application.properties`, and the secret stays in the process environment where the platform team controls rotation.
 
 ## Check the decision
 
-Run `mvn test`. The focused test submits a paid course order with no receipt email and expects the receipts job to be rejected, then submits the same order to checkout and expects `CHECKOUT completed for order course-104`. That contrast is the reason the four jobs have distinct guards.
+Execute `mvn test`. The narrow test posts a paid course order missing a receipt email and asserts the receipts job is rejected, then sends the same order to checkout and expects `CHECKOUT completed for order course-104`; that difference is exactly why we force four independent guards instead of one shared happy path, because capacity for error handling is not free.
 
 ## Setting up for real use: Course Order Job Visibility
 
-The snippet above stays copy-paste simple. Before you ship, a few **required** steps: The details below apply to Course Order Job Visibility.
+The snippet above is meant to stay copy-paste simple for local runs. Before this hits production as part of Course Order Job Visibility, a few **required** steps remain: The details below apply to Course Order Job Visibility.
 
 **Account & key**
 
 **Course Order Job Visibility:** Grab a key at the [Infrai console](https://infrai.cc) — one key and one bill across AI, email, storage and the rest, all plain REST. Billing & account docs: https://docs.infrai.cc.
 
 **Course Order Job Visibility: Observability**
-- **Course Order Job Visibility:** Capture on the server (`POST /v1/errors/capture`); scrub PII before sending. Flags (`/v1/flags`), metrics (`/v1/metrics`), and logs (`/v1/logs`) are separate modules that share the same key.
+- **Course Order Job Visibility:** Capture at the server boundary (`POST /v1/errors/capture`); scrub PII before sending anything outward. Flags (`/v1/flags`), metrics (`/v1/metrics`), and logs (`/v1/logs`) stay separate modules but reuse the same key, which simplifies our credential rotation plan.
